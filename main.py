@@ -2,6 +2,7 @@ import argparse
 import asyncio
 
 from app.agent.manus import Manus
+from app.flow.flow_factory import FlowFactory, FlowType
 from app.logger import logger
 
 
@@ -10,6 +11,13 @@ async def main():
     parser = argparse.ArgumentParser(description="Run Manus agent with a prompt")
     parser.add_argument(
         "--prompt", type=str, required=False, help="Input prompt for the agent"
+    )
+    parser.add_argument(
+        "--flow",
+        type=str,
+        choices=["planning", "agent"],
+        default="planning",
+        help="Choose execution flow: planning (default) or agent",
     )
     args = parser.parse_args()
 
@@ -23,8 +31,19 @@ async def main():
             return
 
         logger.warning("Processing your request...")
-        await agent.run(prompt)
-        logger.info("Request processing completed.")
+
+        if args.flow == "planning":
+            # use PlanningFlow to show TODO list and allow edit
+            flow = FlowFactory.create_flow(
+                flow_type=FlowType.PLANNING,
+                agents={"manus": agent},
+            )
+            result = await flow.execute(prompt)
+            logger.info("Request processing completed.")
+            logger.info(result)
+        else:
+            await agent.run(prompt)
+            logger.info("Request processing completed.")
     except KeyboardInterrupt:
         logger.warning("Operation interrupted.")
     finally:
