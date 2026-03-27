@@ -109,6 +109,22 @@ class PlanningFlow(BaseFlow):
                     return f"Failed to create plan for: {input_text}"
 
             result = ""
+
+            # Show the initial plan/todo list before executing steps
+            try:
+                initial_plan_text = await self._get_plan_text()
+                result += f"Initial TODO list:\n{initial_plan_text}\n\n"
+            except Exception as e:
+                logger.warning(f"Failed to retrieve initial plan text: {e}")
+
+            # Allow user to review/update plan before executing
+            await self._review_plan_with_user()
+            try:
+                updated_plan_text = await self._get_plan_text()
+                result += f"Updated TODO list:\n{updated_plan_text}\n\n"
+            except Exception as e:
+                logger.warning(f"Failed to retrieve updated plan text: {e}")
+
             while True:
                 # Get current step to execute
                 self.current_step_index, step_info = await self._get_current_step_info()
@@ -132,6 +148,82 @@ class PlanningFlow(BaseFlow):
         except Exception as e:
             logger.error(f"Error in PlanningFlow: {str(e)}")
             return f"Execution failed: {str(e)}"
+
+    async def _review_plan_with_user(self) -> None:
+        """Show the todo list to the user and allow basic edits before execution."""
+
+        if self.active_plan_id not in self.planning_tool.plans:
+            return
+
+        # Non-async interactive prompt for CLI environment
+        plan_data = self.planning_tool.plans[self.active_plan_id]
+
+        def render_steps(steps):
+            return "\n".join([f"{i}. {step}" for i, step in enumerate(steps)])
+
+        while True:
+            try:
+                print("\nCurrent TODO list:")
+                print(self._generate_plan_text_from_storage())
+                choice = (
+                    input("Would you like to modify the plan? [y/N]: ").strip().lower()
+                )
+            except (EOFError, KeyboardInterrupt):
+                print("\nSkipping interactive plan edit.")
+                break
+
+            if choice not in ("y", "yes"):
+                break
+
+            steps = plan_data.get("steps", []).copy()
+            print(
+                "\nEdit options:\n1) Add step\n2) Remove step\n3) Update step text\n4) Finish edits"
+            )
+            edit_choice = input("Choose an action [1-4]: ").strip()
+
+            if edit_choice == "1":
+                new_step = input("Enter new step text: ").strip()
+                if new_step:
+                    steps.append(new_step)
+                    print("Step added.")
+            elif edit_choice == "2":
+                print("Current steps:\n" + render_steps(steps))
+                idx = input("Enter step index to remove: ").strip()
+                if idx.isdigit() and 0 <= int(idx) < len(steps):
+                    removed = steps.pop(int(idx))
+                    print(f"Removed step: {removed}")
+                else:
+                    print("Invalid index.")
+            elif edit_choice == "3":
+                print("Current steps:\n" + render_steps(steps))
+                idx = input("Enter step index to update: ").strip()
+                if idx.isdigit() and 0 <= int(idx) < len(steps):
+                    new_text = input("Enter new text for step: ").strip()
+                    if new_text:
+                        steps[int(idx)] = new_text
+                        print("Step updated.")
+                else:
+                    print("Invalid index.")
+            elif edit_choice == "4":
+                print("Done editing plan.")
+                break
+            else:
+                print("Invalid action.")
+                continue
+
+            # Apply changes to planning tool state via update command
+            try:
+                await self.planning_tool.execute(
+                    command="update",
+                    plan_id=self.active_plan_id,
+                    steps=steps,
+                )
+                plan_data = self.planning_tool.plans[self.active_plan_id]
+            except Exception as e:
+                print(f"Failed to update plan: {e}")
+                logger.warning(f"Failed to update plan during interactive edit: {e}")
+
+        print("Interactive plan review completed.")
 
     async def _create_initial_plan(self, request: str) -> None:
         """Create an initial plan based on the request using the flow's LLM and PlanningTool."""
@@ -282,13 +374,14 @@ class PlanningFlow(BaseFlow):
 
         # Create a prompt for the agent to execute the current step
         step_prompt = f"""
-        CURRENT PLAN STATUS:
+        TODO LIST (from current plan):
         {plan_status}
 
         YOUR CURRENT TASK:
         You are now working on step {self.current_step_index}: "{step_text}"
 
-        Please only execute this current step using the appropriate tools. When you're done, provide a summary of what you accomplished.
+        Please prioritize the plan: execute the next logical step, update statuses as needed, and keep the todo list in context.
+        When you're done, provide a summary of what you accomplished.
         """
 
         # Use agent.run() to execute the step
